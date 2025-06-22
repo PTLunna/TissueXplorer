@@ -7,26 +7,16 @@ library(reshape2)
 library(pheatmap)
 library(dplyr)
 library(shinycssloaders)
-#For enrichment analysis
-library(clusterProfiler)
-library(org.Hs.eg.db)
+# For enrichment analysis
+library(enrichR)
 library(DT)
 library(rsconnect)
 
 #print(getwd())
-
-db_path <- file.path(getwd(), "TissueXplorer.db")
-
 #rsconnect::writeManifest()
 
-if (!requireNamespace("BiocManager", quietly = TRUE))
-  install.packages("BiocManager")
 
-BiocManager::install("fgsea")
-
-
-#remove.packages("fgsea")
-
+db_path <- file.path(getwd(), "TissueXplorer.db")
 
 # Função para mostrar nomes sem underscores
 nice_name <- function(x) gsub("_", " ", x)
@@ -83,7 +73,8 @@ ui <- fluidPage(
                             tags$li("Run GO enrichment analysis in the Enrichment tab using any subset of genes."),
                             tags$li("Upload your own gene list or dataset under 'Add User Data', just make sure your uploaded CSV files follow the required format described in the upload section.")
                           ),
-                          p("Enjoy TissueXplorer!")
+                          p("Enjoy TissueXplorer!"),
+                          p("TissueXplorer uses public transcriptomic data from baseline experiments available in Expression atlas (https://www.ebi.ac.uk/gxa/home) and Bgee (https://www.bgee.org/). If you use tissueXplorer tool in your research, please cite  tissueXplorer and the  corresponding studies in your research for this consult our application note available at: ARTIGO SUBMITTED. This tool was developed for use in evolutionary biology studies and is not intended for use in medical diagnosis.")
                    )
                  )
         ),
@@ -104,10 +95,20 @@ ui <- fluidPage(
         tabPanel("Enrichment Analysis",
                  selectInput("enrichment_group", "Select Gene Set for Enrichment",
                              choices = NULL),
-                 actionButton("run_enrichment", "Run GO Enrichment"),
-                 plotOutput("go_barplot"),
-                 DT::dataTableOutput("go_table")
-                 
+                 selectInput("enrichment_database", "Select Database for Enrichment",
+                             choices = c("GO_Biological_Process_2023" = "GO_Biological_Process_2023",
+                                         "GO_Molecular_Function_2023" = "GO_Molecular_Function_2023",
+                                         "GO_Cellular_Component_2023" = "GO_Cellular_Component_2023",
+                                         "KEGG_2021_Human" = "KEGG_2021_Human",
+                                         "WikiPathway_2023_Human" = "WikiPathway_2023_Human",
+                                         "Reactome_2022" = "Reactome_2022"),
+                             selected = "GO_Biological_Process_2023"),
+                 numericInput("max_terms", "Maximum number of terms to show", value = 15000, min = 5, max = 20000),
+                 actionButton("run_enrichment", "Run Enrichment Analysis"),
+                 br(), br(),
+                 withSpinner(plotOutput("enrichment_barplot"), type = 6),
+                 br(),
+                 withSpinner(DT::dataTableOutput("enrichment_table"), type = 6)
         ),
         tabPanel("Add User Data",
                  div(
@@ -134,14 +135,14 @@ ui <- fluidPage(
                      tags$li("The file must be in CSV format (.csv).")
                    )
                  ),
-                
+                 
                  textInput("custom_dataset_name", "Dataset Name", placeholder = "e.g., Mus musculus"),
                  fileInput("custom_file", "Upload CSV File", accept = ".csv"),
                  actionButton("add_dataset_btn", "Add Dataset"),
                  br(),
                  tableOutput("custom_data_preview"),
                  verbatimTextOutput("add_dataset_status")
-        
+                 
         )
       )
     )
@@ -242,15 +243,15 @@ server <- function(input, output, session) {
         filename = NULL,
         fill = c("lightblue", "lightgreen", "lightyellow")[1:n],
         alpha = 0.5,
-        cex = 2.3,
-        cat.cex = 1.5,
+        cex = 2.5,
+        cat.cex = 2,
         cat.pos = cat_pos,
         cat.dist = cat_dist
       )
       grid.draw(venn.plot)
     }
   })
-
+  
   observeEvent(input$goButton, {
     gene_sets <- get_gene_sets()
     species_names <- names(gene_sets)
@@ -295,11 +296,7 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       genes <- intersection_data()[[input$intersection_choice]]
-      
-      # FORCE: flatten to a 1D vector, no matter what
       clean_gene_list <- as.character(na.omit(unique(unlist(genes))))
-      
-      # Now save as a proper 1-column CSV
       write.csv(data.frame(GeneSymbol = clean_gene_list), file, row.names = FALSE, quote = TRUE)
     }
   )
@@ -451,122 +448,81 @@ server <- function(input, output, session) {
     dbDisconnect(conn)
   })
   
-  
-  # === GO ENRICHMENT ANALYSIS ===
-  
-  # Update enrichment group choices when user clicks "Compare"
-  observeEvent(input$goButton, {
-    gene_sets <- get_gene_sets()
-    species_names <- names(gene_sets)
-    n <- length(gene_sets)
-    choices <- list()
-    
-    if (n == 2) {
-      nameA <- nice_name(species_names[1])
-      nameB <- nice_name(species_names[2])
-      choices <- c(
-        species_names,
-        paste0(species_names[1], "_AND_", species_names[2])
-      )
-      names(choices) <- c(
-        nice_name(species_names),
-        paste0(nameA, " & ", nameB)
-      )
-    } else if (n == 3) {
-      nameA <- nice_name(species_names[1])
-      nameB <- nice_name(species_names[2])
-      nameC <- nice_name(species_names[3])
-      
-      choices <- c(
-        species_names,
-        paste0(species_names[1], "_AND_", species_names[2]),
-        paste0(species_names[1], "_AND_", species_names[3]),
-        paste0(species_names[2], "_AND_", species_names[3]),
-        paste0(species_names[1], "_AND_", species_names[2], "_AND_", species_names[3])
-      )
-      
-      names(choices) <- c(
-        nice_name(species_names),
-        paste0(nameA, " & ", nameB),
-        paste0(nameA, " & ", nameC),
-        paste0(nameB, " & ", nameC),
-        paste0(nameA, " & ", nameB, " & ", nameC)
-      )
-    }
-    
+
+# === ENRICHMENT ANALYSIS WITH enrichR ===
+
+# Update enrichment group choices when user clicks "Compare"
+observeEvent(input$goButton, {
+  # Use the intersection_data that was already calculated for the Venn diagram
+  map <- intersection_data()
+  if (length(map) > 0) {
+    choices <- names(map)
     updateSelectInput(session, "enrichment_group", choices = choices)
-  })
+  }
+})
+
+# Perform enrichment analysis when user clicks "Run Enrichment Analysis"
+enrich_result <- eventReactive(input$run_enrichment, {
+  req(input$enrichment_group, input$enrichment_database)
   
-  
-  
-  # Perform GO enrichment when user clicks "Run GO Enrichment"
-  enrich_result <- eventReactive(input$run_enrichment, {
-    req(input$enrichment_group, input$tissue)
+  withProgress(message = "Running enrichment analysis...", value = 0, {
     
-    gene_sets <- get_gene_sets()
-    group_key <- input$enrichment_group
-    selected_genes <- NULL
+    incProgress(0.2, detail = "Getting gene list...")
     
-    if (group_key %in% names(gene_sets)) {
-      selected_genes <- gene_sets[[group_key]]
-    } else if (grepl("_AND_", group_key)) {
-      group_parts <- strsplit(group_key, "_AND_")[[1]]
-      selected_genes <- Reduce(intersect, gene_sets[group_parts])
+    # Get the intersection data that was calculated for the Venn diagram
+    map <- intersection_data()
+    selected_genes <- map[[input$enrichment_group]]
+    
+    if (is.null(selected_genes) || length(selected_genes) == 0) {
+      return(list(error = "No genes found for selected group"))
     }
     
-    if (length(selected_genes) == 0) return(NULL)
+    incProgress(0.5, detail = paste("Running enrichment with", length(selected_genes), "genes..."))
     
-    # Wrap everything in withProgress
-    withProgress(message = "Running enrichment analysis...", value = 0, {
-      incProgress(0.2, detail = "Converting gene symbols...")
+    # Use enrichR for enrichment analysis
+    tryCatch({
+      # Get available databases to ensure our selection is valid
+      dbs <- listEnrichrDbs()
       
-      entrez_ids <- bitr(selected_genes,
-                         fromType = "SYMBOL",
-                         toType = "ENTREZID",
-                         OrgDb = org.Hs.eg.db)
+      # Check if the selected database is available
+      if (!input$enrichment_database %in% dbs$libraryName) {
+        return(list(error = paste("Database", input$enrichment_database, "not available")))
+      }
       
-      if (is.null(entrez_ids) || nrow(entrez_ids) == 0) return(NULL)
+      # Run enrichment
+      result <- enrichr(selected_genes, input$enrichment_database)
       
-      incProgress(0.5, detail = "Running enrichGO...")
+      incProgress(1, detail = "Analysis complete!")
       
-      result <- enrichGO(
-        gene = entrez_ids$ENTREZID,
-        OrgDb = org.Hs.eg.db,
-        ont = "BP",  # Biological Process
-        pAdjustMethod = "BH",
-        pvalueCutoff = 0.05,
-        qvalueCutoff = 0.2,
-        readable = TRUE
-      )
+      if (is.null(result) || length(result) == 0) {
+        return(list(error = "No enrichment results returned"))
+      }
       
-      incProgress(1, detail = "Done.")
-      result
+      # Extract the results for the selected database
+      enrichment_df <- result[[input$enrichment_database]]
+      
+      if (is.null(enrichment_df) || nrow(enrichment_df) == 0) {
+        return(list(error = "No significant enrichment found"))
+      }
+      
+      # Filter significant results (p-value < 0.05)
+      enrichment_df <- enrichment_df[enrichment_df$P.value < 0.05, ]
+      
+      if (nrow(enrichment_df) == 0) {
+        return(list(error = "No significant terms found (p < 0.05)"))
+      }
+      
+      # Sort by p-value and take top results
+      enrichment_df <- enrichment_df[order(enrichment_df$P.value), ]
+      enrichment_df <- head(enrichment_df, input$max_terms)
+      
+      return(list(data = enrichment_df, genes_analyzed = length(selected_genes)))
+      
+    }, error = function(e) {
+      return(list(error = paste("Error in enrichment analysis:", e$message)))
     })
   })
-  
-  
-  
-  # Render barplot of top GO terms
-  output$go_barplot <- renderPlot({
-    ego <- enrich_result()
-    if (!is.null(ego) && nrow(ego) > 0) {
-      barplot(ego, showCategory = 10, title = "Top GO Terms (Biological Process)")
-    }
-  })
-  
-  # Render GO table
-  output$go_table <- DT::renderDataTable({
-    ego <- enrich_result()
-    if (is.null(ego) || nrow(ego) == 0) {
-      return(data.frame(Message = "No enriched GO terms found."))
-    }
-    
-    df <- as.data.frame(ego)[, c("ID", "Description", "GeneRatio", "p.adjust", "Count")]
-    DT::datatable(df, options = list(pageLength = 10), rownames = FALSE)
-  })
-  
-  
+})
 }
 
 shinyApp(ui = ui, server = server)
-
