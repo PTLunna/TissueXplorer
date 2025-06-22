@@ -448,81 +448,208 @@ server <- function(input, output, session) {
     dbDisconnect(conn)
   })
   
-
-# === ENRICHMENT ANALYSIS WITH enrichR ===
-
-# Update enrichment group choices when user clicks "Compare"
-observeEvent(input$goButton, {
-  # Use the intersection_data that was already calculated for the Venn diagram
-  map <- intersection_data()
-  if (length(map) > 0) {
-    choices <- names(map)
-    updateSelectInput(session, "enrichment_group", choices = choices)
-  }
-})
-
-# Perform enrichment analysis when user clicks "Run Enrichment Analysis"
-enrich_result <- eventReactive(input$run_enrichment, {
-  req(input$enrichment_group, input$enrichment_database)
   
-  withProgress(message = "Running enrichment analysis...", value = 0, {
+  # === ENRICHMENT ANALYSIS WITH enrichR ===
+  
+  # Update enrichment group choices when user clicks "Compare"
+  observeEvent(input$goButton, {
+    gene_sets <- get_gene_sets()
+    species_names <- names(gene_sets)
+    n <- length(gene_sets)
+    choices <- list()
     
-    incProgress(0.2, detail = "Getting gene list...")
-    
-    # Get the intersection data that was calculated for the Venn diagram
-    map <- intersection_data()
-    selected_genes <- map[[input$enrichment_group]]
-    
-    if (is.null(selected_genes) || length(selected_genes) == 0) {
-      return(list(error = "No genes found for selected group"))
+    if (n == 2) {
+      nameA <- nice_name(species_names[1])
+      nameB <- nice_name(species_names[2])
+      choices <- c(
+        species_names,
+        paste0(species_names[1], "_AND_", species_names[2])
+      )
+      names(choices) <- c(
+        nice_name(species_names),
+        paste0(nameA, " & ", nameB)
+      )
+    } else if (n == 3) {
+      nameA <- nice_name(species_names[1])
+      nameB <- nice_name(species_names[2])
+      nameC <- nice_name(species_names[3])
+      
+      choices <- c(
+        species_names,
+        paste0(species_names[1], "_AND_", species_names[2]),
+        paste0(species_names[1], "_AND_", species_names[3]),
+        paste0(species_names[2], "_AND_", species_names[3]),
+        paste0(species_names[1], "_AND_", species_names[2], "_AND_", species_names[3])
+      )
+      
+      names(choices) <- c(
+        nice_name(species_names),
+        paste0(nameA, " & ", nameB),
+        paste0(nameA, " & ", nameC),
+        paste0(nameB, " & ", nameC),
+        paste0(nameA, " & ", nameB, " & ", nameC)
+      )
     }
     
-    incProgress(0.5, detail = paste("Running enrichment with", length(selected_genes), "genes..."))
+    updateSelectInput(session, "enrichment_group", choices = choices)
+  })
+  
+  
+  
+  # Perform enrichment analysis when user clicks "Run Enrichment Analysis"
+  enrich_result <- eventReactive(input$run_enrichment, {
+    req(input$enrichment_group, input$enrichment_database)
     
-    # Use enrichR for enrichment analysis
-    tryCatch({
-      # Get available databases to ensure our selection is valid
-      dbs <- listEnrichrDbs()
+    withProgress(message = "Running enrichment analysis...", value = 0, {
       
-      # Check if the selected database is available
-      if (!input$enrichment_database %in% dbs$libraryName) {
-        return(list(error = paste("Database", input$enrichment_database, "not available")))
+      incProgress(0.2, detail = "Getting gene list...")
+      
+      gene_sets <- get_gene_sets()
+      group_key <- input$enrichment_group
+      selected_genes <- NULL
+      
+      if (group_key %in% names(gene_sets)) {
+        selected_genes <- gene_sets[[group_key]]
+      } else if (grepl("_AND_", group_key)) {
+        group_parts <- strsplit(group_key, "_AND_")[[1]]
+        selected_genes <- Reduce(intersect, gene_sets[group_parts])
       }
       
-      # Run enrichment
-      result <- enrichr(selected_genes, input$enrichment_database)
-      
-      incProgress(1, detail = "Analysis complete!")
-      
-      if (is.null(result) || length(result) == 0) {
-        return(list(error = "No enrichment results returned"))
+      if (length(selected_genes) == 0) {
+        return(list(error = "No genes found for selected group"))
       }
       
-      # Extract the results for the selected database
-      enrichment_df <- result[[input$enrichment_database]]
+      incProgress(0.5, detail = paste("Running enrichment with", length(selected_genes), "genes..."))
       
-      if (is.null(enrichment_df) || nrow(enrichment_df) == 0) {
-        return(list(error = "No significant enrichment found"))
-      }
-      
-      # Filter significant results (p-value < 0.05)
-      enrichment_df <- enrichment_df[enrichment_df$P.value < 0.05, ]
-      
-      if (nrow(enrichment_df) == 0) {
-        return(list(error = "No significant terms found (p < 0.05)"))
-      }
-      
-      # Sort by p-value and take top results
-      enrichment_df <- enrichment_df[order(enrichment_df$P.value), ]
-      enrichment_df <- head(enrichment_df, input$max_terms)
-      
-      return(list(data = enrichment_df, genes_analyzed = length(selected_genes)))
-      
-    }, error = function(e) {
-      return(list(error = paste("Error in enrichment analysis:", e$message)))
+      # Use enrichR for enrichment analysis
+      tryCatch({
+        # Get available databases to ensure our selection is valid
+        dbs <- listEnrichrDbs()
+        
+        # Check if the selected database is available
+        if (!input$enrichment_database %in% dbs$libraryName) {
+          return(list(error = paste("Database", input$enrichment_database, "not available")))
+        }
+        
+        # Run enrichment
+        result <- enrichr(selected_genes, input$enrichment_database)
+        
+        incProgress(1, detail = "Analysis complete!")
+        
+        if (is.null(result) || length(result) == 0) {
+          return(list(error = "No enrichment results returned"))
+        }
+        
+        # Extract the results for the selected database
+        enrichment_df <- result[[input$enrichment_database]]
+        
+        if (is.null(enrichment_df) || nrow(enrichment_df) == 0) {
+          return(list(error = "No significant enrichment found"))
+        }
+        
+        # Filter significant results (p-value < 0.05)
+        enrichment_df <- enrichment_df[enrichment_df$P.value < 0.05, ]
+        
+        if (nrow(enrichment_df) == 0) {
+          return(list(error = "No significant terms found (p < 0.05)"))
+        }
+        
+        # Sort by p-value and take top results
+        enrichment_df <- enrichment_df[order(enrichment_df$P.value), ]
+        enrichment_df <- head(enrichment_df, input$max_terms)
+        
+        return(list(data = enrichment_df, genes_analyzed = length(selected_genes)))
+        
+      }, error = function(e) {
+        return(list(error = paste("Error in enrichment analysis:", e$message)))
+      })
     })
   })
-})
+  
+  
+  
+  # Render barplot of top enriched terms
+  output$enrichment_barplot <- renderPlot({
+    result <- enrich_result()
+    
+    if (!is.null(result$error)) {
+      # Create an empty plot with error message
+      plot(1, 1, type = "n", xlab = "", ylab = "", main = result$error, axes = FALSE)
+      return()
+    }
+    
+    if (is.null(result$data) || nrow(result$data) == 0) {
+      plot(1, 1, type = "n", xlab = "", ylab = "", main = "No enrichment results to display", axes = FALSE)
+      return()
+    }
+    
+    df <- result$data
+    
+    # Prepare data for plotting
+    df$neg_log_p <- -log10(df$P.value)
+    df$Term_short <- ifelse(nchar(df$Term) > 50, 
+                            paste0(substr(df$Term, 1, 47), "..."), 
+                            df$Term)
+    
+    # Take top terms for plotting
+    n_terms <- min(15, nrow(df))
+    df_plot <- head(df, n_terms)
+    df_plot$Term_short <- factor(df_plot$Term_short, levels = rev(df_plot$Term_short))
+    
+    # Create barplot
+    ggplot(df_plot, aes(x = Term_short, y = neg_log_p)) +
+      geom_col(fill = "steelblue", alpha = 0.7) +
+      coord_flip() +
+      labs(
+        title = paste("Enrichment Analysis Results -", input$enrichment_database),
+        subtitle = paste("Analyzed", result$genes_analyzed, "genes"),
+        x = "Terms",
+        y = "-log10(P-value)"
+      ) +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 12),
+        axis.text.y = element_text(size = 10),
+        axis.text.x = element_text(size = 10)
+      )
+  })
+  
+  # Render enrichment results table
+  output$enrichment_table <- DT::renderDataTable({
+    result <- enrich_result()
+    
+    if (!is.null(result$error)) {
+      return(data.frame(Message = result$error))
+    }
+    
+    if (is.null(result$data) || nrow(result$data) == 0) {
+      return(data.frame(Message = "No enrichment results found."))
+    }
+    
+    df <- result$data
+    
+    # Select relevant columns for display
+    display_cols <- c("Term", "P.value", "Adjusted.P.value", "Combined.Score", "Genes")
+    df_display <- df[, intersect(display_cols, colnames(df)), drop = FALSE]
+    
+    # Round numeric columns
+    numeric_cols <- sapply(df_display, is.numeric)
+    df_display[numeric_cols] <- lapply(df_display[numeric_cols], function(x) round(x, 6))
+    
+    DT::datatable(
+      df_display, 
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        autoWidth = TRUE,
+        columnDefs = list(list(width = '300px', targets = c(0, 4))) # Make Term and Genes columns wider
+      ), 
+      rownames = FALSE,
+      caption = paste("Enrichment results for", input$enrichment_database)
+    )
+  })
+  
 }
 
 shinyApp(ui = ui, server = server)
