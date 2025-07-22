@@ -2,8 +2,10 @@ TissueXplorer is a user-friendly web application for comparative transcriptomic 
 
 Available online in https://tissuexplorer.shinyapps.io/TissueXplorer/
 &
-You can run TissueXplorer locally using RStudio by running the file "app.R" or "storedata.R" in this repository
+You can run TissueXplorer locally using RStudio by running the file "app.R" or "storedata.R" in this repository.
+
 app.R          Standard version used for deployment (in https://tissuexplorer.shinyapps.io/TissueXplorer/). For security, it does not store custom datasets.
+
 storedata.R    Stores user-uploaded datasets in your local SQLite database. After adding your own data, simply restart the app, and your custom datasets will appear automatically.
  
 
